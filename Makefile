@@ -39,6 +39,7 @@ C_SOURCES =  \
 Src/main.c \
 Src/stm32wbxx_it.c \
 Src/stm32wbxx_hal_msp.c \
+Src/bme280.c \
 Drivers/STM32WBxx_HAL_Driver/Src/stm32wbxx_hal_gpio.c \
 Drivers/STM32WBxx_HAL_Driver/Src/stm32wbxx_hal_i2c.c \
 Drivers/STM32WBxx_HAL_Driver/Src/stm32wbxx_hal_i2c_ex.c \

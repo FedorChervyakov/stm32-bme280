@@ -23,7 +23,8 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "stdlib.h"
+#include "bme280.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -33,7 +34,11 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#define I2C_RXBUFFERSIZE 2000
+#define I2C_TXBUFFERSIZE 2000
 
+#define UART_RXBUFFERSIZE 2000
+#define UART_TXBUFFERSIZE 2000
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -51,7 +56,13 @@ DMA_HandleTypeDef hdma_usart1_rx;
 DMA_HandleTypeDef hdma_usart1_tx;
 
 /* USER CODE BEGIN PV */
+struct bme280_dev bme280;
 
+uint8_t i2c_TxBuffer[I2C_TXBUFFERSIZE];
+uint8_t i2c_RxBuffer[I2C_RXBUFFERSIZE];
+
+uint8_t uart_TxBuffer[UART_RXBUFFERSIZE];
+uint8_t uart_RxBuffer[UART_TXBUFFERSIZE];
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -61,7 +72,19 @@ static void MX_DMA_Init(void);
 static void MX_I2C1_Init(void);
 static void MX_USART1_UART_Init(void);
 /* USER CODE BEGIN PFP */
-
+void bme280_Init(void);
+void user_delay_ms(uint32_t period);
+int8_t user_i2c_read(uint8_t dev_id, uint8_t reg_addr, uint8_t *reg_data, uint16_t len);
+int8_t user_i2c_write(uint8_t dev_id, uint8_t reg_addr, uint8_t *reg_data, uint16_t len);
+void print_sensor_data_serial(struct bme280_data *comp_data);
+int8_t stream_sensor_data_forced_mode(struct bme280_dev *dev);
+#ifdef __GNUC__
+/* With GCC, small printf (option LD Linker->Libraries->Small printf
+   set to 'Yes') calls __io_putchar() */
+#define PUTCHAR_PROTOTYPE int __io_putchar(int ch)
+#else
+#define PUTCHAR_PROTOTYPE int fputc(int ch, FILE *f)
+#endif /* __GNUC__ */
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -102,10 +125,11 @@ int main(void)
   MX_I2C1_Init();
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
+  bme280_Init();
 
+  stream_sensor_data_forced_mode(&bme280);
   /* USER CODE END 2 */
 
-  /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
@@ -188,7 +212,7 @@ static void MX_I2C1_Init(void)
   /* USER CODE END I2C1_Init 1 */
   hi2c1.Instance = I2C1;
   hi2c1.Init.Timing = 0x2000090E;
-  hi2c1.Init.OwnAddress1 = 0;
+  hi2c1.Init.OwnAddress1 = I2C_ADDRESS;
   hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
   hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
   hi2c1.Init.OwnAddress2 = 0;
@@ -233,8 +257,8 @@ static void MX_USART1_UART_Init(void)
 
   /* USER CODE END USART1_Init 1 */
   huart1.Instance = USART1;
-  huart1.Init.BaudRate = 115200;
-  huart1.Init.WordLength = UART_WORDLENGTH_7B;
+  huart1.Init.BaudRate = 9600;
+  huart1.Init.WordLength = UART_WORDLENGTH_8B;
   huart1.Init.StopBits = UART_STOPBITS_1;
   huart1.Init.Parity = UART_PARITY_NONE;
   huart1.Init.Mode = UART_MODE_TX_RX;
@@ -339,7 +363,248 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+PUTCHAR_PROTOTYPE
+{
+    /* Place your implementation of fputc here */
+    /* e.g. write a character to the USART1 and Loop until the end of transmission */
+    if (HAL_UART_Transmit_DMA(&huart1, (uint8_t *)&ch, 1) != HAL_OK)
+    {
+        Error_Handler();
+    }
+    while (HAL_UART_GetState(&huart1) != HAL_UART_STATE_READY)
+    {
+    }
 
+    return ch;
+}
+/*-----------------------------------------------------------------------------
+ *  BME280 user functions
+ *-----------------------------------------------------------------------------*/
+void user_delay_ms(uint32_t period)
+{
+    /*
+     * Return control or wait,
+     * for a period amount of milliseconds
+     */
+    HAL_Delay(period);
+}
+
+int8_t user_i2c_read(uint8_t dev_id, uint8_t reg_addr, uint8_t *reg_data, uint16_t len)
+{
+    int8_t rslt = BME280_OK;                    /* Return 0 for Success, non-zero for failure */
+    /*
+     * The parameter dev_id can be used as a variable to store the I2C address of the device
+     */
+
+    /*
+     * Data on the bus should be like
+     * |------------+---------------------|
+     * | I2C action | Data                |
+     * |------------+---------------------|
+     * | Start      | -                   |
+     * | Write      | (reg_addr)          |
+     * | Stop       | -                   |
+     * | Start      | -                   |
+     * | Read       | (reg_data[0])       |
+     * | Read       | (....)              |
+     * | Read       | (reg_data[len - 1]) |
+     * | Stop       | -                   |
+     * |------------+---------------------|
+     */
+
+    do 
+    {
+        printf("%X", dev_id);
+        if (HAL_I2C_Master_Transmit_DMA(&hi2c1, (uint16_t) dev_id, (uint8_t*) &reg_addr, 1)!= HAL_OK)
+        {
+            /* Error_Handler() function is called when error occurs. */
+            Error_Handler();
+            rslt = BME280_E_COMM_FAIL;
+        }
+
+        while (HAL_I2C_GetState(&hi2c1) != HAL_I2C_STATE_READY)
+        {
+        } 
+        
+        if(HAL_I2C_Master_Receive_DMA(&hi2c1, (uint16_t) dev_id, (uint8_t*) reg_data, len) != HAL_OK)
+        {
+            /* Error_Handler() function is called when error occurs. */
+            Error_Handler();
+            rslt = BME280_E_COMM_FAIL;
+        }
+        while (HAL_I2C_GetState(&hi2c1) != HAL_I2C_STATE_READY)
+        {
+        }
+    }
+    while (HAL_I2C_GetError(&hi2c1) == HAL_I2C_ERROR_AF);
+
+    return rslt;
+}
+
+int8_t user_i2c_write(uint8_t dev_id, uint8_t reg_addr, uint8_t *reg_data, uint16_t len)
+{
+    int8_t rslt = BME280_OK;                    /* Return 0 for Success, non-zero for failure */
+    uint8_t *cmd;
+     /*
+     * The parameter dev_id can be used as a variable to store the I2C address of the device
+     */
+
+    /*
+     * Data on the bus should be like
+     * |------------+---------------------|
+     * | I2C action | Data                |
+     * |------------+---------------------|
+     * | Start      | -                   |
+     * | Write      | (reg_addr)          |
+     * | Write      | (reg_data[0])       |
+     * | Write      | (....)              |
+     * | Write      | (reg_data[len - 1]) |
+     * | Stop       | -                   |
+     * |------------+---------------------|
+     */
+
+
+    /* Allocate memory for the command that is to be written on the bus*/
+    cmd = (uint8_t *) malloc(sizeof(uint8_t) * len * 2);
+    
+    int n;
+    for (int i=0; i<len; i++) {                 /* Build write command */
+        n = 2*i;
+        cmd[n] = reg_addr+i;                    /* register address */
+        cmd[n+1] = reg_data[i];                 /* register data */
+    }
+    
+    do
+    {
+
+        if (HAL_I2C_Master_Transmit_DMA(&hi2c1, (uint16_t) dev_id, (uint8_t *) cmd, len*2) != HAL_OK)    /* Send command */
+        {
+            Error_Handler();
+            rslt = BME280_E_COMM_FAIL;
+        }
+        
+        while (HAL_I2C_GetState(&hi2c1) != HAL_I2C_STATE_READY)
+        {
+        }
+    }
+    while (HAL_I2C_GetError(&hi2c1) == HAL_I2C_ERROR_AF);
+
+    free(cmd);                                  /* Free buffer */
+    return rslt;
+}
+
+
+void bme280_Init(void)
+{
+    bme280.dev_id = BME280_I2C_ADDR_PRIM;
+    bme280.intf = BME280_I2C_INTF;
+    bme280.read = user_i2c_read;
+    bme280.write = user_i2c_write;
+    bme280.delay_ms = user_delay_ms;
+
+    bme280_init(&bme280);
+}
+
+void print_sensor_data_serial(struct bme280_data *comp_data)
+{
+    float temp, press, hum;
+#ifdef BME280_FLOAT_ENABLE
+    temp = comp_data->temperature;
+    press = 0.01 * comp_data->pressure;
+    hum = comp_data->humidity;
+#else
+#ifdef BME280_64BIT_ENABLE
+    temp = 0.01f * comp_data->temperature;
+    press = 0.0001f * comp_data->pressure;
+    hum = 1.0f / 1024.0f * comp_data->humidity;
+#else
+    temp = 0.01f * comp_data->temperature;
+    press = 0.01f * comp_data->pressure;
+    hum = 1.0f / 1024.0f * comp_data->humidity;
+#endif
+#endif
+    printf("%0.2lf deg C, %0.2lf hPa, %0.2lf%%\n", temp, press, hum);
+}
+
+
+int8_t stream_sensor_data_forced_mode(struct bme280_dev *dev)
+{
+    int8_t rslt;
+    uint8_t settings_sel;
+    struct bme280_data comp_data;
+    dev->settings.osr_h = BME280_OVERSAMPLING_1X;
+    dev->settings.osr_p = BME280_OVERSAMPLING_16X;
+    dev->settings.osr_t = BME280_OVERSAMPLING_2X;
+    dev->settings.filter = BME280_FILTER_COEFF_16;
+
+    settings_sel = BME280_OSR_PRESS_SEL | BME280_OSR_TEMP_SEL | BME280_OSR_HUM_SEL | BME280_FILTER_SEL;
+    rslt = bme280_set_sensor_settings(settings_sel, dev);
+	if (rslt != BME280_OK)
+	{
+		printf("Failed to set sensor settings (code %+d).", rslt);
+		return rslt;
+	}
+
+    printf("Temperature, Pressure, Humidity\n");
+    /* Continuously stream sensor data */
+    while (1)
+    {
+        rslt = bme280_set_sensor_mode(BME280_FORCED_MODE, dev);
+        if (rslt != BME280_OK)
+        {
+            printf("Failed to set sensor mode (code %+d).", rslt);
+            break;
+        }
+        /* Wait for the measurement to complete and print data @25Hz */
+        dev->delay_ms(500);
+        rslt = bme280_get_sensor_data(BME280_ALL, &comp_data, dev);
+        if (rslt != BME280_OK)
+        {
+            printf("Failed to get sensor data (code %+d).", rslt);
+            break;
+        }
+        print_sensor_data_serial(&comp_data);
+    }
+
+    return rslt;
+}
+
+/**
+  * @brief  Tx Transfer completed callback
+  * @param  huart: UART handle.
+  * @note   This example shows a simple way to report end of DMA Tx transfer, and
+  *         you can add your own implementation.
+  * @retval None
+  */
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
+{
+    HAL_GPIO_TogglePin(LD1_GPIO_Port, LD1_Pin);
+}
+
+/**
+  * @brief  Rx Transfer completed callback
+  * @param  huart: UART handle
+  * @note   This example shows a simple way to report end of DMA Rx transfer, and
+  *         you can add your own implementation.
+  * @retval None
+  */
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+    HAL_GPIO_TogglePin(LD1_GPIO_Port, LD1_Pin);
+}
+
+/**
+  * @brief  UART error callbacks
+  * @param  huart: UART handle
+  * @note   This example shows a simple way to report transfer error, and you can
+  *         add your own implementation.
+  * @retval None
+  */
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+  /* Turn LED2 on: Transfer error in reception/transmission process */
+  HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
+}
 /* USER CODE END 4 */
 
 /**
@@ -350,7 +615,13 @@ void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
   /* User can add his own implementation to report the HAL error return state */
-
+  while (1)
+  {
+      HAL_GPIO_TogglePin(LD3_GPIO_Port, LD3_Pin);
+      HAL_Delay(333);
+      HAL_GPIO_TogglePin(LD3_GPIO_Port, LD3_Pin);
+      HAL_Delay(333);
+  }
   /* USER CODE END Error_Handler_Debug */
 }
 
@@ -369,6 +640,6 @@ void assert_failed(uint8_t *file, uint32_t line)
      tex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
   /* USER CODE END 6 */
 }
-#endif /* USE_FULL_ASSERT */
+#endif                                          /* USE_FULL_ASSERT */
 
 /************************ (C) COPYRIGHT STMicroelectronics *****END OF FILE****/
